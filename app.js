@@ -126,8 +126,79 @@
       totalEpisodes: null,
       totalSeasons: null,
       watchedMinutesBase: 0, // computed base minutes (before rewatch mult)
+      /** tvmaze episode ids marked watched (for real minute totals) */
+      watchedEpisodeIds: [],
       updatedAt: null,
     };
+  }
+
+  /** Platform / show → best “watch it” URL */
+  function watchLinksFor(t) {
+    const links = [];
+    const seen = new Set();
+    const push = (label, url, primary) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      links.push({ label, url, primary: !!primary });
+    };
+
+    if (t.officialSite) push("Watch official", t.officialSite, true);
+
+    const q = encodeURIComponent(t.title || "");
+    const plats = t.platforms || [];
+    const net = (t.network || "").toLowerCase();
+
+    const addPlatformSearch = (id) => {
+      if (id === "netflix") push("Netflix search", `https://www.netflix.com/search?q=${q}`);
+      else if (id === "disney") push("Disney+", `https://www.disneyplus.com/search?q=${q}`);
+      else if (id === "prime") push("Prime Video", `https://www.primevideo.com/search?phrase=${q}`);
+      else if (id === "apple") push("Apple TV", `https://tv.apple.com/search?term=${q}`);
+      else if (id === "youtube") push("YouTube", `https://www.youtube.com/results?search_query=${q}`);
+      else if (id === "paramount") push("Paramount+", `https://www.paramountplus.com/search/?q=${q}`);
+      else if (id === "max") push("Max", `https://www.max.com/search?q=${q}`);
+      else if (id === "showmax") push("Showmax", `https://www.showmax.com/search?q=${q}`);
+      else if (id === "dstv") push("DStv", `https://www.dstv.com/`);
+    };
+
+    for (const p of plats) addPlatformSearch(p);
+    if (!plats.length && net) {
+      if (net.includes("netflix")) addPlatformSearch("netflix");
+      else if (net.includes("disney")) addPlatformSearch("disney");
+      else if (net.includes("prime") || net.includes("amazon")) addPlatformSearch("prime");
+      else if (net.includes("apple")) addPlatformSearch("apple");
+      else if (net.includes("hbo") || net === "max") addPlatformSearch("max");
+    }
+
+    if (t.tvmazeUrl) push("TVmaze", t.tvmazeUrl, !t.officialSite);
+    return links;
+  }
+
+  function episodeWatchUrl(ep, show) {
+    // Prefer official show page for "watch"; episode page for details
+    return {
+      watch: show?.officialSite || null,
+      details: ep?.url || null,
+    };
+  }
+
+  function stripHtml(html) {
+    if (!html) return "";
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    return (tmp.textContent || tmp.innerText || "").trim();
+  }
+
+  function minutesFromEpisodes(episodes, watchedIds) {
+    if (!episodes?.length || !watchedIds?.length) return { mins: 0, count: 0 };
+    const set = new Set(watchedIds.map(String));
+    let mins = 0;
+    let count = 0;
+    for (const ep of episodes) {
+      if (!set.has(String(ep.id))) continue;
+      count++;
+      mins += Number(ep.runtime) || 0;
+    }
+    return { mins, count };
   }
 
   function loadState() {
@@ -264,7 +335,7 @@
   }
 
   /** Base minutes from seasons/episodes/runtime (before rewatch multiplier) */
-  function computeBaseMinutes(id, entry) {
+  function computeBaseMinutes(id, entry, episodes) {
     const e = entry || userEntry(id);
     const t = getTitle(id);
     const runtime =
@@ -272,15 +343,37 @@
       Number(t && t.runtime) ||
       (t && t.type === "movie" ? 120 : 45);
 
+    // Prefer real episode runtimes when we have watched episode IDs
+    const epsList = episodes || episodeCache[id];
+    if (epsList?.length && e.watchedEpisodeIds?.length) {
+      const { mins, count } = minutesFromEpisodes(epsList, e.watchedEpisodeIds);
+      if (count > 0) {
+        // if some eps missing runtime, fill with average runtime
+        const missing = e.watchedEpisodeIds.length - count;
+        // count is matched; if runtime sum is 0, fall through
+        if (mins > 0) {
+          const matchedWithRuntime = epsList.filter(
+            (ep) => e.watchedEpisodeIds.map(String).includes(String(ep.id)) && ep.runtime
+          ).length;
+          const withoutRt = e.watchedEpisodeIds.length - matchedWithRuntime;
+          return Math.round(mins + withoutRt * runtime);
+        }
+      }
+    }
+
+    if (e.watchedMinutesBase > 0 && e.watchedEpisodeIds?.length) {
+      // kept as explicit when calculated from episode list
+    }
+
     if (e.episodesWatched > 0) {
       return Math.round(e.episodesWatched * runtime);
     }
 
     if (e.seasonsCompleted > 0) {
-      // ~8 eps/season fallback when we don't know episode count
-      const epsPerSeason = e.totalEpisodes && e.totalSeasons
-        ? Math.max(1, Math.round(e.totalEpisodes / e.totalSeasons))
-        : 8;
+      const epsPerSeason =
+        e.totalEpisodes && e.totalSeasons
+          ? Math.max(1, Math.round(e.totalEpisodes / e.totalSeasons))
+          : 8;
       return Math.round(e.seasonsCompleted * epsPerSeason * runtime);
     }
 
@@ -293,7 +386,7 @@
 
     if (e.progress > 0 && t) {
       if (t.type === "movie") return Math.round((e.progress / 100) * runtime);
-      const totalEps = e.totalEpisodes || ((t.seasons || 1) * 8);
+      const totalEps = e.totalEpisodes || (t.seasons || 1) * 8;
       return Math.round((e.progress / 100) * totalEps * runtime);
     }
 
@@ -308,9 +401,13 @@
   /** Total minutes including rewatches */
   function totalMinutesFor(id, entry) {
     const e = entry || userEntry(id);
-    const base = computeBaseMinutes(id, e);
+    let base = 0;
+    if (e.watchedMinutesBase > 0 && e.watchedEpisodeIds?.length) {
+      base = Number(e.watchedMinutesBase);
+    } else {
+      base = computeBaseMinutes(id, e, episodeCache[id]);
+    }
     const re = Math.max(0, Number(e.rewatches) || 0);
-    // rewatches = extra full plays → total plays = 1 + rewatches when you've watched something
     if (base <= 0) return 0;
     return Math.round(base * (1 + re));
   }
@@ -1176,9 +1273,9 @@
         </div>
       </div>
 
-      <div class="hero-bento" style="grid-template-columns:1fr 1fr 1fr">
+      <div class="hero-bento stats-3">
         <div class="stat-tile acid">
-          <div class="lbl">Lifetime hours</div>
+          <div class="lbl">Total hours</div>
           <div class="val">${formatHours(totalMins)}</div>
           <div class="sub">${Math.round(totalMins)} minutes</div>
         </div>
@@ -1427,6 +1524,17 @@
     const footer = document.getElementById("modal-footer");
     if (!root || !body) return;
 
+    const wLinks = watchLinksFor(t);
+    let watchedSet = new Set((u.watchedEpisodeIds || []).map(String));
+    let activeSeasonTab =
+      seasonStats.find((s) => s.season > 0)?.season ??
+      seasonStats[0]?.season ??
+      1;
+
+    // If user has watched ids, prefer that count for form
+    const initialEps =
+      watchedSet.size > 0 ? watchedSet.size : u.episodesWatched || 0;
+
     titleEl.textContent = t.title;
     body.innerHTML = `
       <div class="detail-hero">
@@ -1438,7 +1546,7 @@
             <span>${escapeHtml(String(year))}</span>
             <span>${t.type === "movie" ? "Film" : "Series"}</span>
             ${t.rating ? `<span>${Number(t.rating).toFixed(1)}★</span>` : ""}
-            ${runtimeMinutes ? `<span>~${runtimeMinutes}m</span>` : ""}
+            ${runtimeMinutes ? `<span>~${runtimeMinutes}m avg</span>` : ""}
             ${t.live ? `<span style="color:var(--ok)">LIVE</span>` : ""}
           </div>
           <div class="platform-row" style="margin-top:8px">
@@ -1448,18 +1556,20 @@
           <p class="detail-overview">${escapeHtml(t.overview || "No overview.")}</p>
           ${
             totalEpisodes
-              ? `<p class="hint">${totalEpisodes} episodes · ${totalSeasons || "?"} seasons${
-                  seasonStats.length
-                    ? " · " +
-                      seasonStats
-                        .filter((s) => s.season > 0)
-                        .map((s) => `S${s.season}:${s.count}ep/${formatHours(s.minutes)}`)
-                        .join(" · ")
-                    : ""
-                }</p>`
+              ? `<p class="hint">${totalEpisodes} episodes · ${totalSeasons || "?"} seasons · real runtimes from TVmaze</p>`
               : ""
           }
-          ${t.tvmazeUrl ? `<p class="hint"><a href="${escapeHtml(t.tvmazeUrl)}" target="_blank" rel="noopener">TVmaze ↗</a></p>` : ""}
+          ${
+            wLinks.length
+              ? `<div class="watch-bar">${wLinks
+                  .slice(0, 4)
+                  .map(
+                    (l) =>
+                      `<a class="btn ${l.primary ? "btn-primary" : "btn-secondary"} btn-sm" href="${escapeHtml(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.label)} ↗</a>`
+                  )
+                  .join("")}</div>`
+              : ""
+          }
         </div>
       </div>
 
@@ -1476,14 +1586,14 @@
         <div class="field-row three">
           <div class="field">
             <label for="eps-watched">Episodes watched</label>
-            <input id="eps-watched" type="number" min="0" max="9999" value="${u.episodesWatched || 0}" />
+            <input id="eps-watched" type="number" min="0" max="9999" value="${initialEps}" />
           </div>
           <div class="field">
             <label for="seasons-done">Seasons completed</label>
             <input id="seasons-done" type="number" min="0" max="100" value="${u.seasonsCompleted || 0}" />
           </div>
           <div class="field">
-            <label for="runtime-min">Mins / ep (or film)</label>
+            <label for="runtime-min">Avg mins / ep</label>
             <input id="runtime-min" type="number" min="1" max="400" value="${runtimeMinutes || 45}" />
           </div>
         </div>
@@ -1491,27 +1601,26 @@
           <label for="progress-range">Progress ${u.progress || 0}%</label>
           <input type="range" id="progress-range" min="0" max="100" step="5" value="${u.progress || 0}" />
         </div>
+
         ${
-          seasonStats.length
-            ? `<div class="season-grid" id="season-quick">
-                ${seasonStats
-                  .filter((s) => s.season > 0)
-                  .map(
-                    (s) =>
-                      `<button type="button" class="season-chip" data-log-season="${s.season}" data-season-eps="${s.count}" data-season-mins="${s.minutes}" title="${s.count} eps · ${formatHours(s.minutes)}">S${s.season} · ${s.count}ep</button>`
-                  )
-                  .join("")}
-              </div>
-              <p class="hint">Tap a season to add those episodes to your watched count.</p>`
-            : ""
-        }
-        ${
-          totalEpisodes
-            ? `<button type="button" class="btn btn-secondary btn-sm" id="log-all-eps" style="margin-bottom:8px">Log all ${totalEpisodes} episodes as watched</button>`
-            : ""
+          episodes && episodes.length
+            ? `<div class="ep-guide" id="ep-guide">
+                <div class="section-head" style="margin-bottom:8px">
+                  <h3 style="margin:0;font-size:0.9rem">Episode guide</h3>
+                  <span class="hint" id="ep-guide-summary"></span>
+                </div>
+                <div class="ep-season-tabs" id="ep-season-tabs"></div>
+                <div class="ep-list" id="ep-list"></div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+                  <button type="button" class="btn btn-secondary btn-sm" id="mark-season-watched">Mark season watched</button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="log-all-eps">Mark all watched</button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="clear-ep-marks">Clear marks</button>
+                </div>
+              </div>`
+            : `<p class="hint">No live episode list (offline or film). Enter episodes manually above.</p>`
         }
 
-        <h3 style="margin:12px 0 6px;font-size:0.9rem">Rewatches</h3>
+        <h3 style="margin:14px 0 6px;font-size:0.9rem">Rewatches</h3>
         <div class="stepper">
           <button type="button" id="rewatch-dec" aria-label="Fewer rewatches">−</button>
           <input id="rewatch-count" type="number" min="0" max="99" value="${u.rewatches || 0}" />
@@ -1521,7 +1630,7 @@
 
         <div class="hours-preview" id="hours-preview">
           Estimated for stats: <strong>${formatHours(previewMins)}</strong>
-          <span class="hint" style="display:block;margin-top:4px">eps × runtime × (1 + rewatches)</span>
+          <span class="hint" style="display:block;margin-top:4px">uses real episode minutes when marked</span>
         </div>
       </div>
 
@@ -1555,14 +1664,51 @@
       totalEpisodes,
       totalSeasons,
       runtimeMinutes,
+      episodes: episodes || [],
+      seasonStats,
     };
 
+    function realMinutesFromMarks() {
+      if (!meta.episodes.length || !watchedSet.size) return null;
+      const runtime =
+        Number(body.querySelector("#runtime-min")?.value || meta.runtimeMinutes || 45);
+      let mins = 0;
+      let matched = 0;
+      for (const ep of meta.episodes) {
+        if (!watchedSet.has(String(ep.id))) continue;
+        matched++;
+        mins += Number(ep.runtime) || runtime;
+      }
+      return { mins, matched };
+    }
+
+    function syncCountsFromMarks() {
+      if (!watchedSet.size) return;
+      const epsInp = body.querySelector("#eps-watched");
+      if (epsInp) epsInp.value = String(watchedSet.size);
+      // seasons completed = seasons where all eps marked
+      let done = 0;
+      for (const s of meta.seasonStats.filter((x) => x.season > 0)) {
+        const seasonEps = meta.episodes.filter((ep) => ep.season === s.season);
+        if (seasonEps.length && seasonEps.every((ep) => watchedSet.has(String(ep.id)))) done++;
+      }
+      const sInp = body.querySelector("#seasons-done");
+      if (sInp) sInp.value = String(done);
+      if (meta.totalEpisodes) {
+        const pct = Math.min(100, Math.round((watchedSet.size / meta.totalEpisodes) * 100));
+        const range = body.querySelector("#progress-range");
+        if (range) range.value = String(pct);
+      }
+    }
+
     function readFormHours() {
+      syncCountsFromMarks();
       const episodesWatched = Number(body.querySelector("#eps-watched")?.value || 0);
       const seasonsCompleted = Number(body.querySelector("#seasons-done")?.value || 0);
       const runtime = Number(body.querySelector("#runtime-min")?.value || meta.runtimeMinutes || 45);
       const rewatches = Number(body.querySelector("#rewatch-count")?.value || 0);
       const progress = Number(body.querySelector("#progress-range")?.value || 0);
+      const real = realMinutesFromMarks();
       const draft = {
         ...u,
         episodesWatched,
@@ -1572,16 +1718,116 @@
         progress,
         totalEpisodes: meta.totalEpisodes,
         totalSeasons: meta.totalSeasons,
+        watchedEpisodeIds: [...watchedSet],
+        watchedMinutesBase: real ? real.mins : undefined,
       };
-      const mins = totalMinutesFor(id, draft);
+      // compute with episode list for accuracy
+      let base;
+      if (real && real.matched > 0) base = real.mins;
+      else base = computeBaseMinutes(id, draft, meta.episodes);
+      const mins = base > 0 ? Math.round(base * (1 + rewatches)) : 0;
       const prev = body.querySelector("#hours-preview");
       if (prev) {
+        const how = real && real.matched
+          ? `${real.matched} marked eps · real runtimes`
+          : `${episodesWatched || 0} eps · ${runtime}m avg`;
         prev.innerHTML = `Estimated for stats: <strong>${formatHours(mins)}</strong>
-          <span class="hint" style="display:block;margin-top:4px">${episodesWatched || 0} eps · ${runtime}m · ↻${rewatches} → ${Math.round(mins)} min</span>`;
+          <span class="hint" style="display:block;margin-top:4px">${how} · ↻${rewatches} → ${Math.round(mins)} min</span>`;
       }
       const lab = body.querySelector("label[for='progress-range']");
       if (lab) lab.textContent = `Progress ${progress}%`;
+      const sum = body.querySelector("#ep-guide-summary");
+      if (sum) {
+        const r = realMinutesFromMarks();
+        sum.textContent = r
+          ? `${r.matched} marked · ${formatHours(r.mins)}`
+          : `${meta.totalEpisodes || 0} episodes`;
+      }
       return draft;
+    }
+
+    function renderEpisodeList() {
+      const tabs = body.querySelector("#ep-season-tabs");
+      const list = body.querySelector("#ep-list");
+      if (!tabs || !list || !meta.episodes.length) return;
+
+      const seasons = meta.seasonStats.filter((s) => s.season > 0);
+      tabs.innerHTML = seasons
+        .map((s) => {
+          const marked = meta.episodes.filter(
+            (ep) => ep.season === s.season && watchedSet.has(String(ep.id))
+          ).length;
+          return `<button type="button" class="ep-tab ${activeSeasonTab === s.season ? "on" : ""}" data-season-tab="${s.season}">S${s.season} · ${marked}/${s.count}</button>`;
+        })
+        .join("");
+
+      const eps = meta.episodes.filter((ep) => ep.season === activeSeasonTab);
+      list.innerHTML = eps
+        .map((ep) => {
+          const watched = watchedSet.has(String(ep.id));
+          const code = `S${ep.season}E${ep.number ?? "?"}`;
+          const rt = ep.runtime || meta.runtimeMinutes || "—";
+          const air = ep.airdate || "TBA";
+          const name = ep.name || "Untitled";
+          const summary = stripHtml(ep.summary || "");
+          const urls = episodeWatchUrl(ep, t);
+          return `
+            <div class="ep-row ${watched ? "watched" : ""}" data-ep-id="${ep.id}">
+              <button type="button" class="ep-check" data-toggle-ep="${ep.id}" title="Mark watched">${watched ? "✓" : ""}</button>
+              <div class="ep-main">
+                <div class="ep-code">${escapeHtml(code)}</div>
+                <p class="ep-name">${escapeHtml(name)}</p>
+                <div class="ep-meta">
+                  <span>${rt === "—" ? "— min" : `${rt} min`}</span>
+                  <span>${escapeHtml(air)}</span>
+                  ${summary ? `<span title="${escapeHtml(summary)}">${escapeHtml(summary.slice(0, 80))}${summary.length > 80 ? "…" : ""}</span>` : ""}
+                </div>
+              </div>
+              <div class="ep-actions">
+                ${
+                  urls.watch
+                    ? `<a class="ep-link watch" href="${escapeHtml(urls.watch)}" target="_blank" rel="noopener" data-stop>Watch ↗</a>`
+                    : wLinks[0]
+                      ? `<a class="ep-link watch" href="${escapeHtml(wLinks[0].url)}" target="_blank" rel="noopener" data-stop>Watch ↗</a>`
+                      : ""
+                }
+                ${
+                  urls.details
+                    ? `<a class="ep-link" href="${escapeHtml(urls.details)}" target="_blank" rel="noopener" data-stop>Info ↗</a>`
+                    : ""
+                }
+              </div>
+            </div>`;
+        })
+        .join("");
+
+      tabs.querySelectorAll("[data-season-tab]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          activeSeasonTab = Number(btn.dataset.seasonTab);
+          renderEpisodeList();
+          readFormHours();
+        });
+      });
+
+      list.querySelectorAll("[data-toggle-ep]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const eid = String(btn.dataset.toggleEp);
+          if (watchedSet.has(eid)) watchedSet.delete(eid);
+          else watchedSet.add(eid);
+          // auto status
+          const statusOn = body.querySelector(".status-pill.on");
+          if (watchedSet.size > 0 && statusOn?.dataset.setStatus === "none") {
+            body.querySelectorAll("[data-set-status]").forEach((b) => b.classList.remove("on"));
+            body.querySelector('[data-set-status="watching"]')?.classList.add("on");
+          }
+          renderEpisodeList();
+          readFormHours();
+        });
+      });
+    }
+
+    if (meta.episodes.length) {
+      renderEpisodeList();
     }
 
     ["#eps-watched", "#seasons-done", "#runtime-min", "#rewatch-count", "#progress-range"].forEach(
@@ -1601,27 +1847,32 @@
       readFormHours();
     });
 
-    body.querySelectorAll("[data-log-season]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const add = Number(btn.dataset.seasonEps || 0);
-        const inp = body.querySelector("#eps-watched");
-        inp.value = Number(inp.value || 0) + add;
-        const sDone = body.querySelector("#seasons-done");
-        sDone.value = Number(sDone.value || 0) + 1;
-        btn.classList.add("on");
-        readFormHours();
-        toast(`Logged S${btn.dataset.logSeason}`);
-      });
+    body.querySelector("#mark-season-watched")?.addEventListener("click", () => {
+      for (const ep of meta.episodes.filter((e) => e.season === activeSeasonTab)) {
+        watchedSet.add(String(ep.id));
+      }
+      body.querySelectorAll("[data-set-status]").forEach((b) => b.classList.remove("on"));
+      body.querySelector('[data-set-status="watching"]')?.classList.add("on");
+      renderEpisodeList();
+      readFormHours();
+      toast(`S${activeSeasonTab} marked watched`);
     });
 
     body.querySelector("#log-all-eps")?.addEventListener("click", () => {
-      const inp = body.querySelector("#eps-watched");
-      inp.value = meta.totalEpisodes || 0;
-      const sDone = body.querySelector("#seasons-done");
-      sDone.value = meta.totalSeasons || 0;
+      for (const ep of meta.episodes) watchedSet.add(String(ep.id));
       body.querySelector("#progress-range").value = 100;
+      body.querySelectorAll("[data-set-status]").forEach((b) => b.classList.remove("on"));
+      body.querySelector('[data-set-status="seen"]')?.classList.add("on");
+      renderEpisodeList();
       readFormHours();
-      toast("All episodes loaded");
+      toast("All episodes marked");
+    });
+
+    body.querySelector("#clear-ep-marks")?.addEventListener("click", () => {
+      watchedSet = new Set();
+      renderEpisodeList();
+      readFormHours();
+      toast("Marks cleared");
     });
 
     body.querySelectorAll("[data-set-status]").forEach((btn) => {
@@ -1629,10 +1880,9 @@
         body.querySelectorAll("[data-set-status]").forEach((b) => b.classList.remove("on"));
         btn.classList.add("on");
         const status = btn.dataset.setStatus;
-        if (status === "seen" && meta.totalEpisodes) {
-          body.querySelector("#eps-watched").value = meta.totalEpisodes;
-          body.querySelector("#seasons-done").value = meta.totalSeasons || 0;
-          body.querySelector("#progress-range").value = 100;
+        if (status === "seen" && meta.episodes.length) {
+          for (const ep of meta.episodes) watchedSet.add(String(ep.id));
+          renderEpisodeList();
         }
         readFormHours();
       });
@@ -1648,6 +1898,8 @@
       });
     });
 
+    readFormHours();
+
     footer.querySelector("#save-detail")?.addEventListener("click", () => {
       const draft = readFormHours();
       const statusBtn = body.querySelector(".status-pill.on");
@@ -1657,6 +1909,7 @@
         : u.rating || 0;
       const review = body.querySelector("#review-text")?.value.trim() || "";
       const notes = body.querySelector("#notes-text")?.value.trim() || "";
+      const real = realMinutesFromMarks();
 
       setUserEntry(id, {
         status,
@@ -1670,6 +1923,8 @@
         progress: draft.progress,
         totalEpisodes: meta.totalEpisodes,
         totalSeasons: meta.totalSeasons,
+        watchedEpisodeIds: [...watchedSet],
+        watchedMinutesBase: real ? real.mins : computeBaseMinutes(id, draft, meta.episodes),
       });
       closeModal();
       render();

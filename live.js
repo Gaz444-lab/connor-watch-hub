@@ -93,6 +93,11 @@
       extra.channel ||
       "";
 
+    const webOfficial =
+      (show.webChannel && show.webChannel.officialSite) ||
+      (show.network && show.network.officialSite) ||
+      null;
+
     const title = {
       id,
       tvmazeId: show.id,
@@ -115,7 +120,7 @@
       showStatus: show.status || "",
       language: show.language || "",
       tvmazeUrl: show.url || `https://www.tvmaze.com/shows/${show.id}`,
-      officialSite: show.officialSite || null,
+      officialSite: show.officialSite || webOfficial || null,
       premiered: show.premiered || null,
       weight: show.weight || 0,
     };
