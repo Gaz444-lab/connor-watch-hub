@@ -43,19 +43,27 @@ Double-click **Update Watch Hub.command**, then open **Watch Hub** again.
 
 | Area | Features |
 |------|----------|
-| **Home** | Greeting, continue watching, watchlist rail, trending, new arrivals, personal recommendations |
-| **Discover** | Full catalog · filter by series/movie, platform, genre · sort by trending / rating / year |
-| **New & Hot** | New + trending titles, with a section for platforms you subscribe to |
-| **Watchlist / Watching / Seen** | Status lists · progress bar for series · quick open detail |
-| **Reviews** | All your star ratings + written reviews in one feed |
-| **Stats** | Tracked counts, average rating, estimated hours, genre & platform charts, favourites |
+| **Home** | Greeting, continue watching, **live popular** shows, **airing today**, recommendations |
+| **Discover** | Live + local catalog · filter by source / type / platform / genre |
+| **New & Hot** | **Live airing schedule** (today & tomorrow) + popular streaming titles · Refresh button |
+| **Search** | **Live search** against the full TVmaze database (posters, networks, ratings) |
+| **Watchlist / Watching / Seen** | Status lists · progress bar · works for live *and* local titles |
+| **Reviews** | Star ratings + written reviews |
+| **Stats** | Counts, average rating, estimated hours, genre & platform charts |
 | **Platforms** | Toggle Netflix, Disney+, Showmax, Prime, Apple TV+, YouTube, DStv, Paramount+, Max… |
-| **+ Add** | Add any custom show/movie not in the catalog |
-| **Settings** | Name, export/import JSON backup, clear library |
+| **+ Add** | Custom titles not found online |
+| **Settings** | Name, live refresh, export/import backup, clear library |
 
-**Detail panel (tap any title):** status (watchlist / watching / seen / dropped), 1–5 stars, review, private notes, progress %, episode count.
+**Detail panel:** real posters, network/platform, live episode counts & next air date (when online), status, stars, review, notes.
 
-Catalog ships with **60+** popular series & movies with multi-platform tags (SA-friendly: Showmax, DStv Stream, Netflix, Disney+, etc.).
+### Live data
+
+- Powered by **[TVmaze](https://www.tvmaze.com/api)** (free, no API key, works in the browser).
+- Needs internet for search / schedule / posters; falls back to the local catalog offline.
+- Live results are cached ~30 minutes in the browser session.
+- Attribution is shown in the app (TVmaze license: CC BY-SA).
+
+Local seed catalog still includes **60+** popular series & movies (including films TVmaze doesn’t cover).
 
 ---
 

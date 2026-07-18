@@ -19,13 +19,19 @@
   let state = null;
   let currentView = "home";
   let searchQuery = "";
+  let searchResults = null; // live search hits
+  let searchLoading = false;
+  let liveReady = false;
+  let liveLoading = true;
   let discoverFilters = {
     type: "all",
     platform: "all",
     genre: "all",
     sort: "trending",
+    source: "all", // all | live | local
   };
   let toastTimer = null;
+  let searchTimer = null;
   let detailId = null;
 
   // ——— Bootstrap ———
@@ -40,10 +46,32 @@
     } catch (err) {
       console.warn("Catalog load failed, using empty:", err);
       catalog = { platforms: [], genres: [], titles: [] };
-      toast("Couldn’t load catalog — you can still add your own titles.");
+      toast("Couldn’t load local catalog — live search still works online.");
     }
     mergeCustomIntoCatalog();
-    render();
+    render(); // paint shell immediately
+
+    // Live feeds (TVmaze) — no API key
+    if (window.WatchLive) {
+      liveLoading = true;
+      try {
+        const result = await window.WatchLive.bootstrap();
+        liveReady = !!result.online || (window.WatchLive.popular || []).length > 0;
+        liveLoading = false;
+        if (result.online) {
+          toast("Live data connected · TVmaze");
+        } else if (result.error) {
+          toast("Offline mode — using local catalog");
+        }
+      } catch (err) {
+        liveLoading = false;
+        liveReady = false;
+        console.warn("Live bootstrap failed", err);
+      }
+      render();
+    } else {
+      liveLoading = false;
+    }
   }
 
   // ——— Persistence ———
@@ -107,13 +135,37 @@
 
   function allTitles() {
     const map = new Map();
-    for (const t of catalog.titles || []) map.set(t.id, { ...t, custom: false });
+    // Local seed catalog (movies + curated)
+    for (const t of catalog.titles || []) map.set(t.id, { ...t, custom: false, live: false });
+    // Live TVmaze cache (overwrites same id only if tvmaze-*)
+    if (window.WatchLive) {
+      for (const t of window.WatchLive.allCachedTitles()) {
+        map.set(t.id, { ...t, custom: false });
+      }
+    }
+    // User custom titles
     for (const t of state.customTitles || []) map.set(t.id, { ...t, custom: true });
     return [...map.values()];
   }
 
   function getTitle(id) {
+    if (window.WatchLive) {
+      const live = window.WatchLive.getCached(id);
+      if (live) return live;
+    }
     return allTitles().find((t) => t.id === id) || null;
+  }
+
+  function livePopular() {
+    return window.WatchLive ? window.WatchLive.popular : [];
+  }
+
+  function liveSchedule() {
+    return window.WatchLive ? window.WatchLive.schedule : [];
+  }
+
+  function isLiveOnline() {
+    return !!(window.WatchLive && window.WatchLive.online);
   }
 
   function platformById(id) {
@@ -182,10 +234,16 @@
     const search = document.getElementById("global-search");
     search?.addEventListener("input", (e) => {
       searchQuery = e.target.value.trim();
-      if (searchQuery && currentView !== "discover" && currentView !== "home") {
-        // keep current view but show search results overlay in main for discover-like
+      searchResults = null;
+      clearTimeout(searchTimer);
+      if (!searchQuery) {
+        searchLoading = false;
+        render();
+        return;
       }
+      searchLoading = true;
       render();
+      searchTimer = setTimeout(() => runLiveSearch(searchQuery), 320);
     });
 
     document.addEventListener("keydown", (e) => {
@@ -250,6 +308,41 @@
     }, 2400);
   }
 
+  async function runLiveSearch(q) {
+    const query = q.trim();
+    if (!query) return;
+    try {
+      let liveHits = [];
+      if (window.WatchLive) {
+        liveHits = await window.WatchLive.search(query, 30);
+      }
+      // Also match local catalog / custom
+      const localHits = filterTitles(allTitles().filter((t) => !t.live), {
+        query,
+        sort: "rating",
+      });
+      // Merge: live first, then local not already similar by title
+      const seenTitles = new Set(liveHits.map((t) => t.title.toLowerCase()));
+      const merged = [
+        ...liveHits,
+        ...localHits.filter((t) => !seenTitles.has(t.title.toLowerCase())),
+      ];
+      if (searchQuery === query) {
+        searchResults = merged;
+        searchLoading = false;
+        render();
+      }
+    } catch (err) {
+      console.warn("Live search failed", err);
+      if (searchQuery === query) {
+        searchResults = filterTitles(allTitles(), { query, sort: "rating" });
+        searchLoading = false;
+        toast("Live search unavailable — showing local results");
+        render();
+      }
+    }
+  }
+
   // ——— Render router ———
   function render() {
     setActiveNav();
@@ -260,6 +353,7 @@
     if (searchQuery && currentView !== "settings") {
       main.innerHTML = renderSearchResults();
       bindTitleCards(main);
+      bindViewHandlers(main);
       return;
     }
 
@@ -384,6 +478,23 @@
       saveState();
       render();
       toast("Library cleared");
+    });
+
+    root.querySelector("#refresh-live")?.addEventListener("click", async () => {
+      if (!window.WatchLive) return;
+      toast("Refreshing live data…");
+      liveLoading = true;
+      render();
+      try {
+        await window.WatchLive.refreshFeeds();
+        liveReady = true;
+        liveLoading = false;
+        toast("Live feeds updated");
+      } catch {
+        liveLoading = false;
+        toast("Couldn’t refresh — check internet");
+      }
+      render();
     });
   }
 
@@ -515,25 +626,33 @@
     if (u.rating) {
       userStars = `<span class="stars" title="Your rating">${starString(u.rating)}</span>`;
     } else if (t.rating) {
-      userStars = `<span title="Catalog score">${Number(t.rating).toFixed(1)} ★</span>`;
+      userStars = `<span title="Score">${Number(t.rating).toFixed(1)} ★</span>`;
     }
+
+    const hasImg = !!t.image;
+    const airing =
+      t.airingEpisode && t.airingEpisode.season
+        ? `S${t.airingEpisode.season}E${t.airingEpisode.number || "?"} airing`
+        : "";
 
     return `
       <button type="button" class="title-card" data-title-id="${escapeHtml(t.id)}" style="--hue:${hue}">
-        <div class="poster" style="--hue:${hue}">
+        <div class="poster ${hasImg ? "has-image" : ""}" style="--hue:${hue}">
+          ${hasImg ? `<img class="poster-img" src="${escapeHtml(t.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : ""}
           <span class="poster-letter">${escapeHtml(letter)}</span>
           <div class="badge-row">
+            ${t.live ? `<span class="badge live">Live</span>` : ""}
             ${t.new ? `<span class="badge new">New</span>` : ""}
             ${t.trending && !opts.hideTrending ? `<span class="badge trending">Hot</span>` : ""}
             ${statusBadge(u.status)}
           </div>
           <div class="poster-meta">
             <div class="t-name">${escapeHtml(t.title)}</div>
-            <div class="t-year">${escapeHtml(String(year))} · ${typeLabel}</div>
+            <div class="t-year">${escapeHtml(String(year || "—"))} · ${typeLabel}${airing ? ` · ${escapeHtml(airing)}` : ""}</div>
           </div>
         </div>
         <div class="card-body">
-          <div class="platform-row">${platformPills(t.platforms)}</div>
+          <div class="platform-row">${platformPills(t.platforms)}${t.network && (!t.platforms || t.platforms[0] === "other") ? `<span class="platform-pill" style="background:#555">${escapeHtml(t.network)}</span>` : ""}</div>
           <div class="meta-line">
             ${userStars}
             ${(t.genres || []).slice(0, 2).map((g) => `<span>${escapeHtml(g)}</span>`).join("<span>·</span>")}
@@ -542,6 +661,18 @@
         </div>
       </button>
     `;
+  }
+
+  function creditLine() {
+    return `<p class="credit-line">Live TV data by <a href="https://www.tvmaze.com" target="_blank" rel="noopener">TVmaze</a> · posters & schedules update when online</p>`;
+  }
+
+  function liveStatusChip() {
+    if (liveLoading) return `<span class="live-dot">Loading live data…</span>`;
+    if (isLiveOnline() || livePopular().length) {
+      return `<span class="live-dot">Live · TVmaze</span>`;
+    }
+    return `<span class="live-dot offline">Offline · local catalog</span>`;
   }
 
   function titleGrid(list, emptyMsg) {
@@ -566,8 +697,16 @@
   function renderHome() {
     const watching = titlesByStatus("watching").slice(0, 12);
     const watchlist = titlesByStatus("watchlist").slice(0, 12);
-    const trending = filterTitles(allTitles(), { sort: "trending" }).slice(0, 12);
-    const news = allTitles().filter((t) => t.new).slice(0, 12);
+    const popular = livePopular().slice(0, 14);
+    const schedule = liveSchedule().slice(0, 14);
+    const trending =
+      popular.length > 0
+        ? popular
+        : filterTitles(allTitles(), { sort: "trending" }).slice(0, 12);
+    const news =
+      schedule.length > 0
+        ? schedule
+        : allTitles().filter((t) => t.new).slice(0, 12);
     const recs = recommendations();
     const name = state.userName || "Connor";
     const hour = new Date().getHours();
@@ -581,12 +720,12 @@
 
     return `
       <div class="hero">
-        <div class="hero-kicker">🍿 Watch Hub · for ${escapeHtml(name)}</div>
+        <div class="hero-kicker">🍿 Watch Hub · for ${escapeHtml(name)} · ${liveStatusChip()}</div>
         <h2>${greet}. What are we watching?</h2>
-        <p>Track shows across Netflix, Disney+, Showmax and more — watchlist, progress, ratings and reviews in one place.</p>
+        <p>Live show data from the web — search millions of titles, see what’s airing, track watchlist & reviews. Works offline with the local catalog too.</p>
         <div class="hero-actions">
-          <button type="button" class="btn btn-primary" data-goto="discover">Browse catalog</button>
-          <button type="button" class="btn btn-secondary" data-goto="new" style="background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.2);color:#fff">New & hot</button>
+          <button type="button" class="btn btn-primary" data-goto="discover">Discover</button>
+          <button type="button" class="btn btn-secondary" data-goto="new" style="background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.2);color:#fff">Airing now</button>
           ${
             featured
               ? `<button type="button" class="btn btn-ghost" style="color:#fff" data-title-id="${escapeHtml(featured.id)}">Open: ${escapeHtml(featured.title)}</button>`
@@ -612,11 +751,17 @@
           <div class="stat-sub">finished</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">Reviews</div>
-          <div class="stat-value">${Object.values(state.library).filter((e) => e.review || e.rating).length}</div>
-          <div class="stat-sub">rated / written</div>
+          <div class="stat-label">Live library</div>
+          <div class="stat-value">${livePopular().length + liveSchedule().length || allTitles().length}</div>
+          <div class="stat-sub">${isLiveOnline() ? "from TVmaze" : "local titles"}</div>
         </div>
       </div>
+
+      ${
+        liveLoading
+          ? `<div class="loading-block"><div class="spinner"></div>Fetching live shows & posters…</div>`
+          : ""
+      }
 
       ${
         watching.length
@@ -644,7 +789,7 @@
 
       <section class="section">
         <div class="section-head">
-          <h3>Trending now</h3>
+          <h3>${popular.length ? "Popular on streaming" : "Trending now"}</h3>
           <button type="button" class="linkish" data-goto="discover">Discover</button>
         </div>
         ${titleRail(trending)}
@@ -654,7 +799,7 @@
         news.length
           ? `<section class="section">
               <div class="section-head">
-                <h3>New arrivals</h3>
+                <h3>${schedule.length ? "Airing today / tomorrow" : "New arrivals"}</h3>
                 <button type="button" class="linkish" data-goto="new">New & hot</button>
               </div>
               ${titleRail(news)}
@@ -672,11 +817,20 @@
             : `<p class="hint">Rate a few shows you’ve seen and we’ll suggest more in those genres.</p>`
         }
       </section>
+
+      ${creditLine()}
     `;
   }
 
   function renderDiscover() {
-    const list = filterTitles(allTitles(), {
+    let pool = allTitles();
+    if (discoverFilters.source === "live") {
+      pool = pool.filter((t) => t.live);
+    } else if (discoverFilters.source === "local") {
+      pool = pool.filter((t) => !t.live);
+    }
+
+    const list = filterTitles(pool, {
       type: discoverFilters.type,
       platform: discoverFilters.platform,
       genre: discoverFilters.genre,
@@ -690,12 +844,16 @@
       <div class="page-header">
         <div>
           <h2>Discover</h2>
-          <p>${list.length} titles · filter by platform, genre and type</p>
+          <p>${liveStatusChip()} · ${list.length} titles · use search for the full live database</p>
         </div>
       </div>
 
       <div class="filters">
-        <button type="button" class="chip ${discoverFilters.type === "all" ? "active" : ""}" data-filter="type" data-value="all">All</button>
+        <button type="button" class="chip ${discoverFilters.source === "all" ? "active" : ""}" data-filter="source" data-value="all">All sources</button>
+        <button type="button" class="chip ${discoverFilters.source === "live" ? "active" : ""}" data-filter="source" data-value="live">🔴 Live</button>
+        <button type="button" class="chip ${discoverFilters.source === "local" ? "active" : ""}" data-filter="source" data-value="local">📦 Local</button>
+
+        <button type="button" class="chip ${discoverFilters.type === "all" ? "active" : ""}" data-filter="type" data-value="all">All types</button>
         <button type="button" class="chip ${discoverFilters.type === "series" ? "active" : ""}" data-filter="type" data-value="series">Series</button>
         <button type="button" class="chip ${discoverFilters.type === "movie" ? "active" : ""}" data-filter="type" data-value="movie">Movies</button>
 
@@ -727,24 +885,36 @@
         </select>
       </div>
 
-      ${titleGrid(list, "No titles match these filters.")}
+      ${titleGrid(list, "No titles match these filters. Try Live search in the top bar.")}
+      ${creditLine()}
     `;
   }
 
   function renderNewHot() {
-    const news = filterTitles(
+    const schedule = liveSchedule();
+    const popular = livePopular();
+    const fallback = filterTitles(
       allTitles().filter((t) => t.new || t.trending),
       { sort: "trending" }
     );
+    const news = schedule.length ? schedule : fallback;
     const onMyPlatforms = news.filter((t) => (t.platforms || []).some((p) => state.subscriptions[p]));
+    const streamingOnly = news.filter((t) => t.platforms && t.platforms[0] !== "other");
 
     return `
       <div class="page-header">
         <div>
           <h2>New & hot</h2>
-          <p>Fresh drops and trending titles. Highlighted if they’re on a platform you subscribe to.</p>
+          <p>${liveStatusChip()} · live airing schedule + popular streaming shows</p>
         </div>
+        <button type="button" class="btn btn-secondary" id="refresh-live">Refresh live</button>
       </div>
+
+      ${
+        liveLoading
+          ? `<div class="loading-block"><div class="spinner"></div>Loading schedule…</div>`
+          : ""
+      }
 
       ${
         onMyPlatforms.length
@@ -755,10 +925,30 @@
           : ""
       }
 
+      ${
+        streamingOnly.length && streamingOnly.length !== onMyPlatforms.length
+          ? `<section class="section">
+              <div class="section-head"><h3>Streaming / major platforms</h3></div>
+              ${titleGrid(streamingOnly)}
+            </section>`
+          : ""
+      }
+
       <section class="section">
-        <div class="section-head"><h3>Everything new & trending</h3></div>
-        ${titleGrid(news, "Catalog has no new/trending flags right now.")}
+        <div class="section-head"><h3>${schedule.length ? "Airing today & tomorrow" : "New & trending"}</h3></div>
+        ${titleGrid(news, "No schedule loaded — connect to the internet and hit Refresh live.")}
       </section>
+
+      ${
+        popular.length
+          ? `<section class="section">
+              <div class="section-head"><h3>Popular right now</h3></div>
+              ${titleGrid(popular)}
+            </section>`
+          : ""
+      }
+
+      ${creditLine()}
     `;
   }
 
@@ -811,7 +1001,9 @@
                   const hue = t.posterHue ?? 220;
                   return `
                     <button type="button" class="list-item" data-title-id="${escapeHtml(id)}">
-                      <div class="list-poster" style="--hue:${hue}">${escapeHtml(t.title.charAt(0))}</div>
+                      <div class="list-poster ${t.image ? "has-image" : ""}" style="--hue:${hue}">
+                        ${t.image ? `<img src="${escapeHtml(t.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : escapeHtml(t.title.charAt(0))}
+                      </div>
                       <div class="list-body">
                         <h4>${escapeHtml(t.title)}</h4>
                         <div class="meta-line">
@@ -1026,11 +1218,23 @@
       </div>
 
       <div class="card-panel settings-block">
+        <h3>Live data</h3>
+        <p class="hint" style="margin-bottom:10px">
+          ${liveStatusChip()}<br />
+          Popular cached: ${livePopular().length} · Schedule: ${liveSchedule().length}<br />
+          Source: <a href="https://www.tvmaze.com" target="_blank" rel="noopener">TVmaze</a> (free, no API key). Search the top bar to query the full live database.
+        </p>
+        <div class="settings-actions">
+          <button type="button" class="btn btn-secondary" id="refresh-live">Refresh live feeds</button>
+        </div>
+      </div>
+
+      <div class="card-panel settings-block">
         <h3>About</h3>
         <p class="hint">
           <strong>Watch Hub</strong> — a JustWatch-style tracker for Connor.<br />
-          Catalog version: ${escapeHtml(String(catalog.version || "—"))} · Updated ${escapeHtml(catalog.updated || "—")}<br />
-          ${allTitles().length} titles · ${Object.keys(state.library).length} personal entries<br />
+          Local catalog: v${escapeHtml(String(catalog.version || "—"))} · ${escapeHtml(catalog.updated || "—")}<br />
+          ${allTitles().length} titles in memory · ${Object.keys(state.library).length} personal entries<br />
           Updates: double-click <strong>Update Watch Hub.command</strong> on the Desktop.
         </p>
       </div>
@@ -1038,31 +1242,57 @@
   }
 
   function renderSearchResults() {
-    const list = filterTitles(allTitles(), { sort: "rating" });
+    if (searchLoading && !searchResults) {
+      return `
+        <div class="page-header">
+          <div>
+            <h2>Search</h2>
+            <p>Searching live database for “${escapeHtml(searchQuery)}”…</p>
+          </div>
+        </div>
+        <div class="loading-block"><div class="spinner"></div>Talking to TVmaze…</div>
+      `;
+    }
+    const list = searchResults || filterTitles(allTitles(), { query: searchQuery, sort: "rating" });
+    const liveCount = list.filter((t) => t.live).length;
     return `
       <div class="page-header">
         <div>
           <h2>Search</h2>
-          <p>${list.length} result${list.length === 1 ? "" : "s"} for “${escapeHtml(searchQuery)}”</p>
+          <p>${list.length} result${list.length === 1 ? "" : "s"} for “${escapeHtml(searchQuery)}”
+            ${liveCount ? ` · ${liveCount} live` : ""}</p>
         </div>
       </div>
       ${titleGrid(list, "No matches — try another word, or add a custom title with + Add.")}
+      ${creditLine()}
     `;
   }
 
   // ——— Detail modal ———
-  function openDetail(id) {
-    const t = getTitle(id);
+  async function openDetail(id) {
+    let t = getTitle(id);
     if (!t) {
       toast("Title not found");
       return;
     }
     detailId = id;
+
+    // Refresh live show if we only have a stub
+    if (t.tvmazeId && window.WatchLive) {
+      try {
+        const fresh = await window.WatchLive.getShow(t.tvmazeId);
+        if (fresh) t = fresh;
+      } catch {
+        /* keep cached */
+      }
+    }
+
     const u = userEntry(id);
     const hue = t.posterHue ?? 220;
     const year =
       t.endYear && t.endYear !== t.year ? `${t.year}–${t.endYear}` : t.year || "—";
     const typeLabel = t.type === "movie" ? "Movie" : `Series${t.seasons ? ` · ${t.seasons} season${t.seasons > 1 ? "s" : ""}` : ""}`;
+    const hasImg = !!t.image;
 
     const root = document.getElementById("modal-root");
     const titleEl = document.getElementById("modal-title");
@@ -1073,18 +1303,27 @@
     titleEl.textContent = t.title;
     body.innerHTML = `
       <div class="detail-layout">
-        <div class="detail-poster" style="--hue:${hue}">${escapeHtml(t.title.charAt(0))}</div>
+        <div class="detail-poster ${hasImg ? "has-image" : ""}" style="--hue:${hue}">
+          ${hasImg ? `<img src="${escapeHtml(t.image)}" alt="" referrerpolicy="no-referrer" />` : escapeHtml(t.title.charAt(0))}
+        </div>
         <div>
           <div class="meta-line" style="margin-bottom:6px">
             <strong>${escapeHtml(String(year))}</strong>
             <span>·</span>
             <span>${escapeHtml(typeLabel)}</span>
-            ${t.rating ? `<span>·</span><span>${Number(t.rating).toFixed(1)} catalog ★</span>` : ""}
+            ${t.rating ? `<span>·</span><span>${Number(t.rating).toFixed(1)} ★</span>` : ""}
             ${t.runtime ? `<span>·</span><span>~${t.runtime} min</span>` : ""}
+            ${t.live ? `<span>·</span><span class="live-dot" style="font-size:0.75rem">Live</span>` : ""}
           </div>
-          <div class="platform-row" style="margin-bottom:8px">${platformPills(t.platforms)}</div>
+          <div class="platform-row" style="margin-bottom:8px">
+            ${platformPills(t.platforms)}
+            ${t.network ? `<span class="platform-pill" style="background:#444">${escapeHtml(t.network)}</span>` : ""}
+          </div>
           <div class="meta-line">${(t.genres || []).map((g) => `<span class="chip" style="padding:3px 8px;cursor:default">${escapeHtml(g)}</span>`).join("")}</div>
+          ${t.showStatus ? `<p class="hint" style="margin:6px 0 0">Show status: <strong>${escapeHtml(t.showStatus)}</strong>${t.airingEpisode ? ` · Latest listed: S${t.airingEpisode.season}E${t.airingEpisode.number || "?"} (${escapeHtml(t.airingEpisode.airdate || "")})` : ""}</p>` : ""}
           <p class="detail-overview">${escapeHtml(t.overview || "No overview yet.")}</p>
+          ${t.tvmazeUrl ? `<p class="hint"><a href="${escapeHtml(t.tvmazeUrl)}" target="_blank" rel="noopener">View on TVmaze ↗</a>${t.officialSite ? ` · <a href="${escapeHtml(t.officialSite)}" target="_blank" rel="noopener">Official site ↗</a>` : ""}</p>` : ""}
+          <div id="episode-info" class="hint"></div>
         </div>
       </div>
 
@@ -1214,6 +1453,30 @@
     });
 
     footer.querySelectorAll("[data-close-modal]").forEach((b) => b.addEventListener("click", closeModal));
+
+    // Live episode count for series
+    if (t.tvmazeId && window.WatchLive) {
+      const epEl = body.querySelector("#episode-info");
+      if (epEl) {
+        epEl.textContent = "Loading episode list…";
+        window.WatchLive
+          .fetchEpisodes(t.tvmazeId)
+          .then((eps) => {
+            if (detailId !== id || !epEl.isConnected) return;
+            const aired = eps.filter((e) => e.airdate && Date.parse(e.airdate) <= Date.now());
+            const next = eps.find((e) => e.airdate && Date.parse(e.airdate) > Date.now());
+            const seasons = new Set(eps.map((e) => e.season).filter((s) => s != null));
+            epEl.innerHTML = `<strong>${eps.length}</strong> episodes · <strong>${seasons.size}</strong> seasons · <strong>${aired.length}</strong> aired${
+              next
+                ? ` · next: S${next.season}E${next.number} (${escapeHtml(next.airdate)})`
+                : ""
+            }`;
+          })
+          .catch(() => {
+            if (epEl.isConnected) epEl.textContent = "";
+          });
+      }
+    }
   }
 
   function closeModal() {
