@@ -1,8 +1,8 @@
-# Connor's Watch Hub 🍿
+# Connor's Watch Hub · Neon Deck 🎞
 
-**JustWatch-style tracker for shows & movies** — where to watch, watchlist, progress, ratings and reviews.
+**JustWatch-style tracker** with a full neon redesign — live data, multi-platform filters, Top 10 boards, season/episode logs, rewatches, and real hours-watched stats.
 
-Same family setup as **School Hub** and **Mystery Hollow**: runs in the browser on the Mac, Desktop shortcuts to open / update, data stays local.
+Same family setup as **School Hub**: browser app, Desktop open/update shortcuts, data stays local.
 
 ---
 
@@ -39,31 +39,29 @@ Double-click **Update Watch Hub.command**, then open **Watch Hub** again.
 
 ---
 
-## What’s in the hub
+## What’s in the hub (v1.2 Neon Deck)
 
 | Area | Features |
 |------|----------|
-| **Home** | Greeting, continue watching, **live popular** shows, **airing today**, recommendations |
-| **Discover** | Live + local catalog · filter by source / type / platform / genre |
-| **New & Hot** | **Live airing schedule** (today & tomorrow) + popular streaming titles · Refresh button |
-| **Search** | **Live search** against the full TVmaze database (posters, networks, ratings) |
-| **Watchlist / Watching / Seen** | Status lists · progress bar · works for live *and* local titles |
-| **Reviews** | Star ratings + written reviews |
-| **Stats** | Counts, average rating, estimated hours, genre & platform charts |
-| **Platforms** | Toggle Netflix, Disney+, Showmax, Prime, Apple TV+, YouTube, DStv, Paramount+, Max… |
-| **+ Add** | Custom titles not found online |
-| **Settings** | Name, live refresh, export/import backup, clear library |
+| **Deck (Home)** | Bento hero, LED stats, continue/queue rails, Top 10 teaser, live popular + airing |
+| **Top 10** | Category boards (Overall, Action, Comedy, Sci-Fi…) ranked across **your selected platforms** |
+| **Signals bar** | **Multi-select platforms** (All / Mine / Clear) — filters junk from browse, airing, Top 10 |
+| **Browse / Airing** | Live + local · filtered to active platforms |
+| **Search** | Full TVmaze search · platforms you care about ranked first |
+| **Queue / Watching / Seen** | Status lists with episode + hours badges |
+| **Hours (Stats)** | **Total hours** from seasons/episodes × runtime × **rewatches** · genre & platform time charts |
+| **Detail log** | Episodes watched, seasons completed, mins/ep, season chips from live data, rewatch stepper, hours preview |
+| **Setup** | Name, live sync, export/import backup |
 
-**Detail panel:** real posters, network/platform, live episode counts & next air date (when online), status, stars, review, notes.
+### Hours math
+
+`episodes × runtime minutes × (1 + rewatches)`  
+(or seasons × ~eps/season × runtime when you log seasons). Marking **Seen** can auto-fill all aired episodes from TVmaze.
 
 ### Live data
 
-- Powered by **[TVmaze](https://www.tvmaze.com/api)** (free, no API key, works in the browser).
-- Needs internet for search / schedule / posters; falls back to the local catalog offline.
-- Live results are cached ~30 minutes in the browser session.
-- Attribution is shown in the app (TVmaze license: CC BY-SA).
-
-Local seed catalog still includes **60+** popular series & movies (including films TVmaze doesn’t cover).
+- **[TVmaze](https://www.tvmaze.com/api)** (free, no API key).
+- Offline falls back to local **60+** title seed catalog.
 
 ---
 
