@@ -459,11 +459,6 @@
     return parts.join(", ");
   }
 
-  function formatDurationBreakdown(mins) {
-    const d = splitDuration(mins);
-    return d;
-  }
-
   function titlesByStatus(status) {
     return allTitles().filter((t) => userEntry(t.id).status === status);
   }
