@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en-ZA" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#07070f" />
+  <meta name="description" content="Connor's Watch Hub — track shows & movies across Netflix, Disney+, Showmax and more. Watchlist, seen, reviews, stats." />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Watch Hub · Connor</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍿</text></svg>" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon" aria-hidden="true">🍿</span>
+        <div class="brand-text">
+          <h1>Watch Hub</h1>
+          <p class="subtitle" id="sidebar-user">Connor</p>
+        </div>
+      </div>
+
+      <nav class="nav" id="main-nav" aria-label="Main">
+        <button type="button" class="nav-btn active" data-view="home">
+          <span class="nav-emoji">🏠</span><span>Home</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="discover">
+          <span class="nav-emoji">🔍</span><span>Discover</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="new">
+          <span class="nav-emoji">✨</span><span>New & Hot</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="watchlist">
+          <span class="nav-emoji">📌</span><span>Watchlist</span>
+          <span class="nav-badge" id="badge-watchlist" hidden>0</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="watching">
+          <span class="nav-emoji">▶️</span><span>Watching</span>
+          <span class="nav-badge" id="badge-watching" hidden>0</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="seen">
+          <span class="nav-emoji">✅</span><span>Seen</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="reviews">
+          <span class="nav-emoji">⭐</span><span>Reviews</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="stats">
+          <span class="nav-emoji">📊</span><span>Stats</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="platforms">
+          <span class="nav-emoji">📺</span><span>Platforms</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button type="button" class="nav-btn" data-view="settings">
+          <span class="nav-emoji">⚙️</span><span>Settings</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="topbar">
+        <button type="button" class="icon-btn mobile-menu" id="mobile-menu" aria-label="Menu">☰</button>
+        <div class="search-wrap">
+          <span class="search-icon" aria-hidden="true">🔍</span>
+          <input
+            type="search"
+            id="global-search"
+            class="search-input"
+            placeholder="Search shows, movies, genres…"
+            autocomplete="off"
+            enterkeyhint="search"
+          />
+          <kbd class="search-hint">/</kbd>
+        </div>
+        <div class="topbar-actions">
+          <button type="button" class="btn btn-primary" id="btn-add-title" title="Add a title">
+            <span>+</span> Add
+          </button>
+          <button type="button" class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">☀️</button>
+        </div>
+      </header>
+
+      <main id="main" class="main"></main>
+    </div>
+  </div>
+
+  <!-- Mobile nav drawer backdrop -->
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+
+  <!-- Detail / edit modal -->
+  <div id="modal-root" class="modal-root" hidden>
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-header">
+        <h2 id="modal-title">Title</h2>
+        <button type="button" class="icon-btn" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-footer" id="modal-footer"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast" hidden role="status"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

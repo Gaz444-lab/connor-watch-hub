@@ -1,0 +1,6 @@
+.server.pid
+*.log
+.DS_Store
+.idea/
+.vscode/
+node_modules/

@@ -1,0 +1,18 @@
+{
+  "name": "Connor's Watch Hub",
+  "short_name": "Watch Hub",
+  "description": "Track shows & movies across Netflix, Disney+, Showmax and more. Watchlist, reviews, stats.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#07070f",
+  "theme_color": "#e50914",
+  "lang": "en-ZA",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍿</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
