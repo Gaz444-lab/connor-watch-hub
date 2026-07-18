@@ -750,6 +750,27 @@ img {
   letter-spacing: 0.08em;
 }
 
+.time-total-panel {
+  border-color: color-mix(in srgb, var(--acid) 30%, var(--line));
+  background: linear-gradient(135deg, var(--acid-dim), transparent 55%), var(--panel);
+}
+
+.time-units .led .n {
+  color: var(--cyan);
+}
+
+.time-units .led:first-child .n {
+  color: var(--pink);
+}
+
+.time-units .led:nth-child(2) .n {
+  color: var(--amber);
+}
+
+.time-units .led:nth-child(3) .n {
+  color: var(--acid);
+}
+
 /* ── Ticket cards ── */
 .rail-scroll {
   display: grid;

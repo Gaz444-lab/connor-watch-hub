@@ -412,13 +412,56 @@
     return Math.round(base * (1 + re));
   }
 
+  /** Split minutes into years / days / hours / minutes (24h day, 365d year) */
+  function splitDuration(mins) {
+    const total = Math.max(0, Math.round(Number(mins) || 0));
+    const years = Math.floor(total / (60 * 24 * 365));
+    let rem = total % (60 * 24 * 365);
+    const days = Math.floor(rem / (60 * 24));
+    rem = rem % (60 * 24);
+    const hours = Math.floor(rem / 60);
+    const minutes = rem % 60;
+    return { total, years, days, hours, minutes };
+  }
+
+  /**
+   * Compact duration for cards/bars: e.g. "2d 5h", "1y 12d", "3h 20m"
+   * Includes days and years when the total is large enough.
+   */
   function formatHours(mins) {
-    if (!mins || mins < 1) return "0h";
-    const h = Math.floor(mins / 60);
-    const m = Math.round(mins % 60);
-    if (h === 0) return `${m}m`;
-    if (m === 0) return `${h}h`;
-    return `${h}h ${m}m`;
+    const { total, years, days, hours, minutes } = splitDuration(mins);
+    if (total < 1) return "0m";
+    const parts = [];
+    if (years > 0) parts.push(`${years}y`);
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    // show minutes if under 1 day, or if zero higher units
+    if (minutes > 0 && years === 0 && days === 0) parts.push(`${minutes}m`);
+    else if (parts.length === 0) parts.push(`${minutes}m`);
+    // when we have y/d, still show hours if any (skip tiny minutes)
+    if ((years > 0 || days > 0) && hours === 0 && minutes > 0 && parts.length < 2) {
+      parts.push(`${minutes}m`);
+    }
+    return parts.join(" ");
+  }
+
+  /** Long form for the Hours page: "1 year, 12 days, 5 hours, 20 minutes" */
+  function formatDurationLong(mins) {
+    const { total, years, days, hours, minutes } = splitDuration(mins);
+    if (total < 1) return "0 minutes";
+    const parts = [];
+    if (years > 0) parts.push(`${years} year${years === 1 ? "" : "s"}`);
+    if (days > 0) parts.push(`${days} day${days === 1 ? "" : "s"}`);
+    if (hours > 0) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`);
+    if (minutes > 0 || parts.length === 0) {
+      parts.push(`${minutes} minute${minutes === 1 ? "" : "s"}`);
+    }
+    return parts.join(", ");
+  }
+
+  function formatDurationBreakdown(mins) {
+    const d = splitDuration(mins);
+    return d;
   }
 
   function titlesByStatus(status) {
@@ -1265,29 +1308,46 @@
     const platsSorted = Object.entries(platMins).sort((a, b) => b[1] - a[1]);
     const maxP = platsSorted[0]?.[1] || 1;
 
+    const totalParts = splitDuration(totalMins);
+    const baseParts = splitDuration(baseMins);
+    const rewatchParts = splitDuration(rewatchMins);
+
     return `
       <div class="page-head">
         <div>
           <h2>Hours</h2>
-          <p>Built from seasons, episodes, runtimes & rewatches</p>
+          <p>Years · days · hours · minutes from seasons, episodes, runtimes & rewatches</p>
         </div>
       </div>
 
-      <div class="hero-bento stats-3">
+      <div class="panel time-total-panel">
+        <div class="lbl" style="margin-bottom:8px">Total watch time</div>
+        <div class="val" style="font-size:clamp(1.5rem,3vw,2.2rem);color:var(--acid);margin-bottom:6px">${formatHours(totalMins)}</div>
+        <p class="hint" style="margin:0 0 14px;font-family:var(--font)">${escapeHtml(formatDurationLong(totalMins))}</p>
+        <div class="led-row time-units" style="margin-bottom:0">
+          <div class="led"><div class="n">${totalParts.years}</div><div class="l">Years</div></div>
+          <div class="led"><div class="n">${totalParts.days}</div><div class="l">Days</div></div>
+          <div class="led"><div class="n">${totalParts.hours}</div><div class="l">Hours</div></div>
+          <div class="led"><div class="n">${totalParts.minutes}</div><div class="l">Minutes</div></div>
+        </div>
+        <p class="hint" style="margin:12px 0 0">${Math.round(totalMins)} total minutes · 24h days · 365d years</p>
+      </div>
+
+      <div class="hero-bento stats-3" style="margin-top:14px">
         <div class="stat-tile acid">
-          <div class="lbl">Total hours</div>
+          <div class="lbl">All time</div>
           <div class="val">${formatHours(totalMins)}</div>
-          <div class="sub">${Math.round(totalMins)} minutes</div>
+          <div class="sub">${totalParts.years}y ${totalParts.days}d · ${totalParts.hours}h ${totalParts.minutes}m</div>
         </div>
         <div class="stat-tile cyan">
           <div class="lbl">First watch</div>
           <div class="val">${formatHours(baseMins)}</div>
-          <div class="sub">base runtime</div>
+          <div class="sub">${baseParts.years}y ${baseParts.days}d · ${baseParts.hours}h ${baseParts.minutes}m</div>
         </div>
         <div class="stat-tile pink">
-          <div class="lbl">Rewatch hours</div>
+          <div class="lbl">Rewatches</div>
           <div class="val">${formatHours(rewatchMins)}</div>
-          <div class="sub">${rewatches} rewatch marks</div>
+          <div class="sub">${rewatchParts.years}y ${rewatchParts.days}d · ${rewatches} marks</div>
         </div>
       </div>
 
