@@ -6,6 +6,11 @@
   "use strict";
 
   const STORAGE_KEY = "connor-watch-hub-v1";
+  const APP_VERSION = "1.2.4";
+  /** Prefer disk API when launched via server.py; localStorage is the browser cache */
+  let diskSaveOk = null; // null unknown, true/false after first try
+  let saveTimer = null;
+  let applyingRemote = false;
   const STATUSES = [
     { id: "none", label: "Off", emoji: "○" },
     { id: "watchlist", label: "Queue", emoji: "◇" },
@@ -51,9 +56,12 @@
 
   // ─── Bootstrap ───
   async function init() {
-    state = loadState();
+    state = loadStateFromLocal();
+    // Merge durable disk copy (if server.py is running) before first paint settles
+    await mergeDiskStateOnBoot();
     applyTheme();
     bindChrome();
+    bindStorageSync();
     renderPlatformChips();
     try {
       const res = await fetch("data/catalog.json", { cache: "no-store" });
@@ -117,6 +125,8 @@
        * Live cache is temporary — without this, Seen/Queue vanish while hours remain.
        */
       knownTitles: {},
+      /** id → ISO time deleted (stops multi-tab / disk merge from resurrecting removals) */
+      libraryTombstones: {},
     };
   }
 
@@ -209,48 +219,220 @@
     return { mins, count };
   }
 
-  function loadState() {
+  function normalizeIncomingState(parsed) {
+    if (!parsed || typeof parsed !== "object") return defaultState();
+    const base = defaultState();
+    const lib = {};
+    for (const [id, e] of Object.entries(parsed.library || {})) {
+      if (!id || !e || typeof e !== "object") continue;
+      lib[id] = { ...defaultEntry(), ...e };
+    }
+    const known = {};
+    for (const [id, t] of Object.entries(parsed.knownTitles || {})) {
+      if (t && (t.id || id)) known[id] = { ...t, id: t.id || id };
+    }
+    for (const t of parsed.customTitles || []) {
+      if (t && t.id) known[t.id] = { ...(known[t.id] || {}), ...t, custom: true };
+    }
+    const tombs = {};
+    for (const [id, ts] of Object.entries(parsed.libraryTombstones || {})) {
+      if (id && ts) tombs[id] = String(ts);
+    }
+    return {
+      ...base,
+      ...parsed,
+      version: 3,
+      subscriptions: { ...base.subscriptions, ...(parsed.subscriptions || {}) },
+      activePlatforms: Array.isArray(parsed.activePlatforms)
+        ? parsed.activePlatforms
+        : base.activePlatforms,
+      library: lib,
+      customTitles: Array.isArray(parsed.customTitles) ? parsed.customTitles : [],
+      knownTitles: known,
+      libraryTombstones: tombs,
+    };
+  }
+
+  function loadStateFromLocal() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return defaultState();
-      const parsed = JSON.parse(raw);
-      const base = defaultState();
-      const lib = {};
-      for (const [id, e] of Object.entries(parsed.library || {})) {
-        lib[id] = { ...defaultEntry(), ...e };
-      }
-      const known = {};
-      for (const [id, t] of Object.entries(parsed.knownTitles || {})) {
-        if (t && (t.id || id)) known[id] = { ...t, id: t.id || id };
-      }
-      // Older backups stored title fields only on customTitles — keep those too
-      for (const t of parsed.customTitles || []) {
-        if (t && t.id) known[t.id] = { ...(known[t.id] || {}), ...t, custom: true };
-      }
-      return {
-        ...base,
-        ...parsed,
-        version: 3,
-        subscriptions: { ...base.subscriptions, ...(parsed.subscriptions || {}) },
-        activePlatforms: Array.isArray(parsed.activePlatforms)
-          ? parsed.activePlatforms
-          : base.activePlatforms,
-        library: lib,
-        customTitles: parsed.customTitles || [],
-        knownTitles: known,
-      };
+      return normalizeIncomingState(JSON.parse(raw));
     } catch {
       return defaultState();
     }
   }
 
+  function entryTime(e) {
+    return (e && e.updatedAt) || "";
+  }
+
+  function isTombstoned(tombs, id, againstTime) {
+    const ts = tombs && tombs[id];
+    if (!ts) return false;
+    return String(ts) >= String(againstTime || "");
+  }
+
+  /** Prefer newer updatedAt per library id; respect tombstones; union knownTitles */
+  function mergeStates(a, b) {
+    const out = normalizeIncomingState({
+      ...a,
+      ...b,
+      library: {},
+      knownTitles: { ...(a.knownTitles || {}), ...(b.knownTitles || {}) },
+      libraryTombstones: { ...(a.libraryTombstones || {}), ...(b.libraryTombstones || {}) },
+      customTitles: [],
+    });
+    out.userName = b.userName || a.userName || out.userName;
+    out.theme = b.theme || a.theme || out.theme;
+    out.subscriptions = { ...a.subscriptions, ...b.subscriptions };
+    out.activePlatforms = Array.isArray(b.activePlatforms)
+      ? b.activePlatforms
+      : a.activePlatforms || out.activePlatforms;
+
+    // Newest tombstone wins per id
+    const tombs = { ...(a.libraryTombstones || {}) };
+    for (const [id, ts] of Object.entries(b.libraryTombstones || {})) {
+      if (!tombs[id] || String(ts) > String(tombs[id])) tombs[id] = String(ts);
+    }
+    out.libraryTombstones = tombs;
+
+    const ids = new Set([
+      ...Object.keys(a.library || {}),
+      ...Object.keys(b.library || {}),
+    ]);
+    for (const id of ids) {
+      const ea = (a.library || {})[id];
+      const eb = (b.library || {})[id];
+      let pick = null;
+      if (ea && eb) {
+        pick = entryTime(eb) >= entryTime(ea) ? eb : ea;
+      } else {
+        pick = eb || ea;
+      }
+      if (!pick) continue;
+      if (isTombstoned(tombs, id, entryTime(pick))) continue;
+      out.library[id] = { ...defaultEntry(), ...pick };
+    }
+
+    const cmap = new Map();
+    for (const t of [...(a.customTitles || []), ...(b.customTitles || [])]) {
+      if (t && t.id) cmap.set(t.id, t);
+    }
+    out.customTitles = [...cmap.values()];
+    return out;
+  }
+
+  function exportableState() {
+    return {
+      version: 3,
+      appVersion: APP_VERSION,
+      userName: state.userName,
+      theme: state.theme,
+      activePlatforms: state.activePlatforms,
+      subscriptions: state.subscriptions,
+      library: state.library,
+      customTitles: state.customTitles,
+      knownTitles: state.knownTitles || {},
+      libraryTombstones: state.libraryTombstones || {},
+      savedAt: new Date().toISOString(),
+    };
+  }
+
   function saveState() {
+    if (!state || applyingRemote) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      // Pull only *newer* entries from other tabs — do not resurrect our deletes
+      const other = loadStateFromLocal();
+      state = mergeStates(other, state);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(exportableState()));
     } catch (err) {
       console.warn("Watch Hub save failed", err);
       toast("Could not save — storage full?");
+      return;
     }
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      void persistToDisk();
+    }, 200);
+  }
+
+  async function persistToDisk() {
+    if (!state) return;
+    try {
+      const res = await fetch("/api/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ state: exportableState() }),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        diskSaveOk = false;
+        return;
+      }
+      const data = await res.json();
+      diskSaveOk = !!data.ok;
+    } catch {
+      diskSaveOk = false;
+    }
+  }
+
+  async function mergeDiskStateOnBoot() {
+    try {
+      const res = await fetch("/api/state", { cache: "no-store", headers: { Accept: "application/json" } });
+      if (!res.ok) {
+        diskSaveOk = false;
+        return;
+      }
+      const data = await res.json();
+      if (!data.ok) {
+        diskSaveOk = false;
+        return;
+      }
+      diskSaveOk = true;
+      if (data.state && data.state.library) {
+        const fromDisk = normalizeIncomingState(data.state);
+        const before = Object.keys(state.library || {}).length;
+        state = mergeStates(state, fromDisk);
+        const after = Object.keys(state.library || {}).length;
+        // Write merged back so localStorage and disk agree
+        applyingRemote = true;
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(exportableState()));
+        } catch {
+          /* ignore */
+        }
+        applyingRemote = false;
+        // Ensure disk has the union too
+        void persistToDisk();
+        if (after > before) {
+          console.info(`Watch Hub: merged disk library (${before} → ${after} titles)`);
+        }
+      } else {
+        // No disk file yet — seed it from browser storage
+        void persistToDisk();
+      }
+    } catch {
+      diskSaveOk = false;
+    }
+  }
+
+  function bindStorageSync() {
+    window.addEventListener("storage", (e) => {
+      if (e.key !== STORAGE_KEY || !e.newValue) return;
+      try {
+        const incoming = normalizeIncomingState(JSON.parse(e.newValue));
+        applyingRemote = true;
+        state = mergeStates(state, incoming);
+        applyingRemote = false;
+        applyTheme();
+        renderPlatformChips();
+        render();
+      } catch (err) {
+        console.warn("storage sync", err);
+        applyingRemote = false;
+      }
+    });
   }
 
   /** Persist a minimal title card so lists still work after live cache expires */
@@ -471,7 +653,10 @@
     }
     // Snapshot title so Seen / Queue survive after live cache clears
     const t = getTitle(id);
-    if (t && !t.stub) rememberTitle(t, false);
+    if (t) rememberTitle(t, false);
+    if (!state.libraryTombstones) state.libraryTombstones = {};
+    // Revive if re-adding
+    delete state.libraryTombstones[id];
     state.library[id] = next;
     const e = state.library[id];
     const hasEpMarks = Array.isArray(e.watchedEpisodeIds) && e.watchedEpisodeIds.length > 0;
@@ -488,6 +673,7 @@
       !hasEpMarks
     ) {
       delete state.library[id];
+      state.libraryTombstones[id] = new Date().toISOString();
     }
     saveState();
     updateBadges();
@@ -1114,8 +1300,14 @@
     root.querySelector("#import-data")?.addEventListener("change", importData);
     root.querySelector("#reset-data")?.addEventListener("click", () => {
       if (!confirm("Clear all library data?")) return;
+      const now = new Date().toISOString();
+      state.libraryTombstones = state.libraryTombstones || {};
+      for (const id of Object.keys(state.library || {})) {
+        state.libraryTombstones[id] = now;
+      }
       state.library = {};
       state.customTitles = [];
+      state.knownTitles = {};
       saveState();
       render();
       toast("Library wiped");
@@ -1622,6 +1814,10 @@
   }
 
   function renderSettings() {
+    const libN = Object.keys(state.library || {}).length;
+    const seenN = countStatus("seen");
+    const diskLabel =
+      diskSaveOk === true ? "Disk save ON (survives relaunch)" : diskSaveOk === false ? "Disk save off — use Desktop / Deck launch" : "Disk save…";
     return `
       <div class="page-head"><div><h2>Setup</h2><p>Profile, live sync, backups</p></div></div>
       <div class="panel">
@@ -1630,6 +1826,14 @@
           <label for="settings-name">Display name</label>
           <input id="settings-name" type="text" value="${escapeHtml(state.userName || "")}" maxlength="40" />
         </div>
+      </div>
+      <div class="panel">
+        <h3>Your library</h3>
+        <p class="hint" style="margin-bottom:8px">
+          ${libN} logged · ${seenN} seen · app v${APP_VERSION}<br/>
+          ${escapeHtml(diskLabel)}
+        </p>
+        <p class="hint">Tip: always open via <strong>Watch Hub.command</strong> or Connor's Deck (http://127.0.0.1:8766) so saves stick.</p>
       </div>
       <div class="panel">
         <h3>Live data</h3>
@@ -1646,7 +1850,7 @@
       </div>
       <div class="panel">
         <h3>About</h3>
-        <p class="hint">Watch Hub Neon Deck · seasons, hours, rewatches, multi-platform Top 10<br/>Local catalog v${escapeHtml(String(catalog.version || "—"))} · ${allTitles().length} titles loaded</p>
+        <p class="hint">Watch Hub Neon Deck · seasons, hours, rewatches, multi-platform Top 10<br/>Local catalog v${escapeHtml(String(catalog.version || "—"))} · ${allTitles().length} titles loaded · v${APP_VERSION}</p>
       </div>
     `;
   }
@@ -2172,6 +2376,9 @@
       if (!confirm(`Delete “${t.title}”?`)) return;
       state.customTitles = state.customTitles.filter((x) => x.id !== id);
       delete state.library[id];
+      if (!state.libraryTombstones) state.libraryTombstones = {};
+      state.libraryTombstones[id] = new Date().toISOString();
+      delete (state.knownTitles || {})[id];
       saveState();
       closeModal();
       render();
@@ -2298,20 +2505,7 @@
         const data = JSON.parse(reader.result);
         const incoming = data.state || data;
         const base = defaultState();
-        const known = { ...(incoming.knownTitles || {}) };
-        for (const t of incoming.customTitles || []) {
-          if (t?.id) known[t.id] = { ...(known[t.id] || {}), ...t, custom: true };
-        }
-        state = {
-          ...base,
-          ...incoming,
-          version: 3,
-          subscriptions: { ...base.subscriptions, ...(incoming.subscriptions || {}) },
-          activePlatforms: incoming.activePlatforms || base.activePlatforms,
-          library: incoming.library || {},
-          customTitles: incoming.customTitles || [],
-          knownTitles: known,
-        };
+        state = mergeStates(state, normalizeIncomingState(incoming));
         saveState();
         applyTheme();
         renderPlatformChips();

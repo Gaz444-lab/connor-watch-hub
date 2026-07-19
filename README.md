@@ -39,7 +39,9 @@ Double-click **Update Watch Hub.command**, then open **Watch Hub** again.
 
 ---
 
-## What’s in the hub (v1.2.3 Neon Deck)
+## What’s in the hub (v1.2.4 Neon Deck)
+
+**Durable library:** Seen / Queue / hours save to the browser **and** to `data/user-state.json` on disk (when launched via Desktop shortcut or Deck). That way stop/relaunch does not drop selections. Always open via **Watch Hub.command** or Connor’s Deck — not a random `file://` or GitHub Pages tab for daily use.
 
 | Area | Features |
 |------|----------|

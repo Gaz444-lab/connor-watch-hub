@@ -4,3 +4,8 @@
 .idea/
 .vscode/
 node_modules/
+__pycache__/
+*.pyc
+# Connor's personal library (never push to GitHub)
+data/user-state.json
+
