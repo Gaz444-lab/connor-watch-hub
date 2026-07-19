@@ -156,8 +156,19 @@
   }
 
   function loadDiskCache() {
+    // Prefer localStorage so live titles survive browser restarts (sessionStorage wiped them)
     try {
-      const raw = sessionStorage.getItem(CACHE_KEY);
+      let raw = localStorage.getItem(CACHE_KEY);
+      if (!raw) {
+        raw = sessionStorage.getItem(CACHE_KEY);
+        if (raw) {
+          try {
+            localStorage.setItem(CACHE_KEY, raw);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       if (!raw) return null;
       const data = JSON.parse(raw);
       if (!data || Date.now() - data.ts > CACHE_TTL_MS) return null;
@@ -169,15 +180,18 @@
 
   function saveDiskCache() {
     try {
-      sessionStorage.setItem(
-        CACHE_KEY,
-        JSON.stringify({
-          ts: Date.now(),
-          popular: memory.popular,
-          schedule: memory.schedule,
-          titles: [...memory.byId.values()],
-        })
-      );
+      const payload = JSON.stringify({
+        ts: Date.now(),
+        popular: memory.popular,
+        schedule: memory.schedule,
+        titles: [...memory.byId.values()],
+      });
+      localStorage.setItem(CACHE_KEY, payload);
+      try {
+        sessionStorage.setItem(CACHE_KEY, payload);
+      } catch {
+        /* ignore */
+      }
     } catch {
       /* quota */
     }

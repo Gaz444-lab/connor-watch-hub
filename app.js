@@ -81,16 +81,19 @@
       }
       updateLivePill();
       render();
+      // Restore cards for anything Connor logged that is no longer in the live cache
+      hydrateMissingLibraryTitles().catch((err) => console.warn("hydrate", err));
     } else {
       liveLoading = false;
       updateLivePill();
+      hydrateMissingLibraryTitles().catch(() => {});
     }
   }
 
   // ─── State ───
   function defaultState() {
     return {
-      version: 2,
+      version: 3,
       userName: "Connor",
       theme: "dark",
       /** multi-select: which platforms are “on” for browsing (filters junk) */
@@ -109,6 +112,11 @@
       },
       library: {},
       customTitles: [],
+      /**
+       * Snapshots of any title Connor has logged (esp. live TVmaze search hits).
+       * Live cache is temporary — without this, Seen/Queue vanish while hours remain.
+       */
+      knownTitles: {},
     };
   }
 
@@ -211,16 +219,25 @@
       for (const [id, e] of Object.entries(parsed.library || {})) {
         lib[id] = { ...defaultEntry(), ...e };
       }
+      const known = {};
+      for (const [id, t] of Object.entries(parsed.knownTitles || {})) {
+        if (t && (t.id || id)) known[id] = { ...t, id: t.id || id };
+      }
+      // Older backups stored title fields only on customTitles — keep those too
+      for (const t of parsed.customTitles || []) {
+        if (t && t.id) known[t.id] = { ...(known[t.id] || {}), ...t, custom: true };
+      }
       return {
         ...base,
         ...parsed,
-        version: 2,
+        version: 3,
         subscriptions: { ...base.subscriptions, ...(parsed.subscriptions || {}) },
         activePlatforms: Array.isArray(parsed.activePlatforms)
           ? parsed.activePlatforms
           : base.activePlatforms,
         library: lib,
         customTitles: parsed.customTitles || [],
+        knownTitles: known,
       };
     } catch {
       return defaultState();
@@ -228,7 +245,120 @@
   }
 
   function saveState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (err) {
+      console.warn("Watch Hub save failed", err);
+      toast("Could not save — storage full?");
+    }
+  }
+
+  /** Persist a minimal title card so lists still work after live cache expires */
+  function rememberTitle(t, doSave = false) {
+    if (!t || !t.id || !state) return;
+    if (!state.knownTitles) state.knownTitles = {};
+    const prev = state.knownTitles[t.id] || {};
+    state.knownTitles[t.id] = {
+      id: t.id,
+      title: t.title || prev.title || humanizeId(t.id),
+      type: t.type || prev.type || "series",
+      year: t.year ?? prev.year ?? null,
+      endYear: t.endYear ?? prev.endYear ?? null,
+      seasons: t.seasons ?? prev.seasons ?? null,
+      genres: Array.isArray(t.genres) ? t.genres : prev.genres || [],
+      platforms: Array.isArray(t.platforms) ? t.platforms : prev.platforms || [],
+      overview: t.overview || prev.overview || "",
+      rating: t.rating ?? prev.rating ?? 0,
+      runtime: t.runtime ?? prev.runtime ?? null,
+      image: t.image || prev.image || null,
+      posterHue: t.posterHue ?? prev.posterHue ?? 280,
+      tvmazeId: t.tvmazeId ?? prev.tvmazeId ?? parseTvmazeId(t.id),
+      network: t.network || prev.network || "",
+      live: !!(t.live || prev.live),
+      officialSite: t.officialSite || prev.officialSite || null,
+      tvmazeUrl: t.tvmazeUrl || prev.tvmazeUrl || null,
+      custom: !!(t.custom || prev.custom),
+      trending: !!t.trending,
+      new: !!t.new,
+    };
+    if (doSave) saveState();
+  }
+
+  function parseTvmazeId(id) {
+    const m = String(id || "").match(/^tvmaze-(\d+)$/);
+    return m ? Number(m[1]) : null;
+  }
+
+  function humanizeId(id) {
+    return String(id || "Title")
+      .replace(/^tvmaze-/, "Show ")
+      .replace(/^custom-/, "")
+      .replace(/-\d+[a-z0-9]*$/i, "")
+      .replace(/[-_]+/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim() || "Untitled";
+  }
+
+  function stubTitle(id) {
+    const tvmazeId = parseTvmazeId(id);
+    return {
+      id,
+      title: humanizeId(id),
+      type: "series",
+      year: null,
+      genres: [],
+      platforms: ["other"],
+      overview: "Restored from your watch log.",
+      rating: 0,
+      runtime: 45,
+      posterHue: 220,
+      image: null,
+      tvmazeId,
+      live: !!tvmazeId,
+      stub: true,
+    };
+  }
+
+  /**
+   * Re-fetch any library titles that are not in catalog/live memory.
+   * Fixes older saves that only stored library entries without snapshots.
+   */
+  async function hydrateMissingLibraryTitles() {
+    if (!state?.library) return;
+    let changed = false;
+    const ids = Object.keys(state.library);
+    for (const id of ids) {
+      if (getTitle(id) && !getTitle(id).stub) {
+        // ensure snapshot exists even if live/catalog has it
+        const t = getTitle(id);
+        if (t && !state.knownTitles[id]) {
+          rememberTitle(t, false);
+          changed = true;
+        }
+        continue;
+      }
+      const tvmazeId = parseTvmazeId(id);
+      if (tvmazeId && window.WatchLive) {
+        try {
+          const t = await window.WatchLive.getShow(tvmazeId);
+          if (t) {
+            rememberTitle(t, false);
+            changed = true;
+            continue;
+          }
+        } catch {
+          /* fall through to stub */
+        }
+      }
+      if (!state.knownTitles[id]) {
+        rememberTitle(stubTitle(id), false);
+        changed = true;
+      }
+    }
+    if (changed) {
+      saveState();
+      render();
+    }
   }
 
   function applyTheme() {
@@ -255,20 +385,35 @@
   // ─── Catalog / live ───
   function allTitles() {
     const map = new Map();
+    // Snapshots first so logged titles always appear, then fresher sources overwrite
+    for (const t of Object.values(state.knownTitles || {})) {
+      if (t && t.id) map.set(t.id, { ...t });
+    }
     for (const t of catalog.titles || []) map.set(t.id, { ...t, custom: false, live: !!t.live });
     if (window.WatchLive) {
       for (const t of window.WatchLive.allCachedTitles()) map.set(t.id, { ...t, custom: false });
     }
     for (const t of state.customTitles || []) map.set(t.id, { ...t, custom: true });
+    // Ensure every library key can surface in status lists even without a snapshot yet
+    for (const id of Object.keys(state.library || {})) {
+      if (!map.has(id)) map.set(id, stubTitle(id));
+    }
     return [...map.values()];
   }
 
   function getTitle(id) {
+    if (!id) return null;
     if (window.WatchLive) {
       const live = window.WatchLive.getCached(id);
       if (live) return live;
     }
-    return allTitles().find((t) => t.id === id) || null;
+    const fromCatalog = (catalog.titles || []).find((t) => t.id === id);
+    if (fromCatalog) return fromCatalog;
+    const custom = (state.customTitles || []).find((t) => t.id === id);
+    if (custom) return custom;
+    if (state.knownTitles && state.knownTitles[id]) return state.knownTitles[id];
+    if (state.library && state.library[id]) return stubTitle(id);
+    return null;
   }
 
   function livePopular() {
@@ -314,10 +459,22 @@
   function setUserEntry(id, patch) {
     const prev = userEntry(id);
     const next = { ...prev, ...patch, updatedAt: new Date().toISOString() };
-    // auto compute base minutes when episode/runtime fields change
-    next.watchedMinutesBase = computeBaseMinutes(id, next);
+    // Keep real episode-minute totals when the detail form already calculated them
+    if (
+      patch.watchedMinutesBase != null &&
+      Array.isArray(patch.watchedEpisodeIds) &&
+      patch.watchedEpisodeIds.length
+    ) {
+      next.watchedMinutesBase = Math.max(0, Number(patch.watchedMinutesBase) || 0);
+    } else {
+      next.watchedMinutesBase = computeBaseMinutes(id, next);
+    }
+    // Snapshot title so Seen / Queue survive after live cache clears
+    const t = getTitle(id);
+    if (t && !t.stub) rememberTitle(t, false);
     state.library[id] = next;
     const e = state.library[id];
+    const hasEpMarks = Array.isArray(e.watchedEpisodeIds) && e.watchedEpisodeIds.length > 0;
     if (
       e.status === "none" &&
       !e.rating &&
@@ -326,7 +483,9 @@
       !e.episodesWatched &&
       !e.progress &&
       !e.rewatches &&
-      !e.seasonsCompleted
+      !e.seasonsCompleted &&
+      !e.watchedMinutesBase &&
+      !hasEpMarks
     ) {
       delete state.library[id];
     }
@@ -460,7 +619,11 @@
   }
 
   function titlesByStatus(status) {
-    return allTitles().filter((t) => userEntry(t.id).status === status);
+    // Build from library keys (source of truth), not only titles currently in live memory
+    return Object.entries(state.library)
+      .filter(([, e]) => e.status === status)
+      .map(([id]) => getTitle(id) || stubTitle(id))
+      .filter(Boolean);
   }
 
   function countStatus(status) {
@@ -1518,10 +1681,15 @@
     if (t.tvmazeId && window.WatchLive) {
       try {
         const fresh = await window.WatchLive.getShow(t.tvmazeId);
-        if (fresh) t = fresh;
+        if (fresh) {
+          t = fresh;
+          rememberTitle(t, true);
+        }
       } catch {
-        /* keep */
+        /* keep snapshot / stub */
       }
+    } else if (t && !t.stub) {
+      rememberTitle(t, false);
     }
 
     let episodes = episodeCache[id] || null;
@@ -1877,6 +2045,8 @@
           }
           renderEpisodeList();
           readFormHours();
+          // Keep episode marks durable without requiring Save
+          quickPersistDetail();
         });
       });
     }
@@ -1910,6 +2080,7 @@
       body.querySelector('[data-set-status="watching"]')?.classList.add("on");
       renderEpisodeList();
       readFormHours();
+      quickPersistDetail();
       toast(`S${activeSeasonTab} marked watched`);
     });
 
@@ -1920,6 +2091,7 @@
       body.querySelector('[data-set-status="seen"]')?.classList.add("on");
       renderEpisodeList();
       readFormHours();
+      quickPersistDetail();
       toast("All episodes marked");
     });
 
@@ -1927,6 +2099,7 @@
       watchedSet = new Set();
       renderEpisodeList();
       readFormHours();
+      quickPersistDetail();
       toast("Marks cleared");
     });
 
@@ -1937,25 +2110,16 @@
         const status = btn.dataset.setStatus;
         if (status === "seen" && meta.episodes.length) {
           for (const ep of meta.episodes) watchedSet.add(String(ep.id));
+          body.querySelector("#progress-range").value = 100;
           renderEpisodeList();
         }
         readFormHours();
+        // Persist status immediately so closing the modal doesn't drop the selection
+        quickPersistDetail();
       });
     });
 
-    body.querySelectorAll("[data-rate]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const rating = Number(btn.dataset.rate);
-        body.querySelectorAll("[data-rate]").forEach((b) => {
-          b.classList.toggle("on", Number(b.dataset.rate) <= rating);
-        });
-        body.dataset.pendingRating = String(rating);
-      });
-    });
-
-    readFormHours();
-
-    footer.querySelector("#save-detail")?.addEventListener("click", () => {
+    function quickPersistDetail() {
       const draft = readFormHours();
       const statusBtn = body.querySelector(".status-pill.on");
       const status = statusBtn?.dataset.setStatus || u.status || "watchlist";
@@ -1965,7 +2129,7 @@
       const review = body.querySelector("#review-text")?.value.trim() || "";
       const notes = body.querySelector("#notes-text")?.value.trim() || "";
       const real = realMinutesFromMarks();
-
+      rememberTitle(t, false);
       setUserEntry(id, {
         status,
         rating,
@@ -1981,6 +2145,24 @@
         watchedEpisodeIds: [...watchedSet],
         watchedMinutesBase: real ? real.mins : computeBaseMinutes(id, draft, meta.episodes),
       });
+      updateBadges();
+    }
+
+    body.querySelectorAll("[data-rate]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const rating = Number(btn.dataset.rate);
+        body.querySelectorAll("[data-rate]").forEach((b) => {
+          b.classList.toggle("on", Number(b.dataset.rate) <= rating);
+        });
+        body.dataset.pendingRating = String(rating);
+      });
+    });
+
+    readFormHours();
+
+    footer.querySelector("#save-detail")?.addEventListener("click", () => {
+      rememberTitle(t, false);
+      quickPersistDetail();
       closeModal();
       render();
       toast(`Saved · ${formatHours(totalMinutesFor(id))}`);
@@ -2116,19 +2298,25 @@
         const data = JSON.parse(reader.result);
         const incoming = data.state || data;
         const base = defaultState();
+        const known = { ...(incoming.knownTitles || {}) };
+        for (const t of incoming.customTitles || []) {
+          if (t?.id) known[t.id] = { ...(known[t.id] || {}), ...t, custom: true };
+        }
         state = {
           ...base,
           ...incoming,
-          version: 2,
+          version: 3,
           subscriptions: { ...base.subscriptions, ...(incoming.subscriptions || {}) },
           activePlatforms: incoming.activePlatforms || base.activePlatforms,
           library: incoming.library || {},
           customTitles: incoming.customTitles || [],
+          knownTitles: known,
         };
         saveState();
         applyTheme();
         renderPlatformChips();
         render();
+        hydrateMissingLibraryTitles().catch(() => {});
         toast("Imported");
       } catch {
         toast("Import failed");

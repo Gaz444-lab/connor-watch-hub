@@ -39,7 +39,7 @@ Double-click **Update Watch Hub.command**, then open **Watch Hub** again.
 
 ---
 
-## What’s in the hub (v1.2 Neon Deck)
+## What’s in the hub (v1.2.3 Neon Deck)
 
 | Area | Features |
 |------|----------|
